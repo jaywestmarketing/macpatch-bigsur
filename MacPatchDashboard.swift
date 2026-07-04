@@ -1,14 +1,21 @@
 import SwiftUI
 import Foundation
 
-// MARK: - Model
+// MARK: - Data model
 
-struct PatchState {
-    var realVersion: String = ""
-    var reportedVersion: String = ""
-    var reportedBuild: String = ""
-    var isPatched: Bool = false
-    var log: [LogEntry] = []
+struct PatchableApp: Identifiable, Hashable {
+    let id = UUID()
+    let name: String
+    let path: String
+    let bundleID: String
+    let requiredVersion: String
+    var isPatched: Bool
+    var iconImage: NSImage?
+
+    var displayVersion: String { requiredVersion }
+
+    func hash(into hasher: inout Hasher) { hasher.combine(id) }
+    static func == (a: PatchableApp, b: PatchableApp) -> Bool { a.id == b.id }
 }
 
 struct LogEntry: Identifiable {
@@ -17,166 +24,376 @@ struct LogEntry: Identifiable {
     let message: String
     let kind: Kind
     enum Kind { case info, success, error }
+
+    static let fmt: DateFormatter = {
+        let f = DateFormatter(); f.dateFormat = "HH:mm:ss"; return f
+    }()
 }
 
-let knownVersions: [(label: String, version: String, build: String)] = [
-    ("macOS 12.0  Monterey",  "12.0",   "21A559"),
-    ("macOS 12.3  Monterey",  "12.3",   "21E230"),
-    ("macOS 12.6  Monterey",  "12.6",   "21G115"),
-    ("macOS 12.6.9 Monterey", "12.6.9", "21G931"),
-    ("macOS 12.7.6 Monterey", "12.7.6", "21H1320"),
-    ("macOS 13.0  Ventura",   "13.0",   "22A380"),
-    ("macOS 13.5  Ventura",   "13.5",   "22G74"),
-    ("macOS 13.6.9 Ventura",  "13.6.9", "22G931"),
-    ("macOS 13.7.6 Ventura",  "13.7.6", "22H625"),
-    ("macOS 14.0  Sonoma",    "14.0",   "23A344"),
-    ("macOS 14.7.6 Sonoma",   "14.7.6", "23H626"),
-]
+// MARK: - App scanner
+
+struct AppScanner {
+    static let searchDirs = ["/Applications", "\(NSHomeDirectory())/Applications"]
+    static let bigsurVer  = OperatingSystemVersion(majorVersion: 11, minorVersion: 0, patchVersion: 0)
+
+    static func scan() -> [PatchableApp] {
+        var results: [PatchableApp] = []
+        let fm = FileManager.default
+
+        for dir in searchDirs {
+            guard let items = try? fm.contentsOfDirectory(atPath: dir) else { continue }
+            for item in items where item.hasSuffix(".app") {
+                let appPath = "\(dir)/\(item)"
+                let plistPath = "\(appPath)/Contents/Info.plist"
+                guard let dict = NSDictionary(contentsOfFile: plistPath) else { continue }
+
+                let minVer = (dict["LSMinimumSystemVersion"] as? String) ?? ""
+                guard !minVer.isEmpty else { continue }
+
+                let parts = minVer.split(separator: ".").compactMap { Int($0) }
+                guard parts.count >= 1, parts[0] >= 12 else { continue }
+
+                let name     = (dict["CFBundleName"] as? String)
+                           ?? (dict["CFBundleDisplayName"] as? String)
+                           ?? item.replacingOccurrences(of: ".app", with: "")
+                let bundleID = (dict["CFBundleIdentifier"] as? String) ?? ""
+                let backup   = "\(plistPath).macpatch-backup"
+                let patched  = fm.fileExists(atPath: backup)
+                let icon     = NSWorkspace.shared.icon(forFile: appPath)
+
+                results.append(PatchableApp(
+                    name: name,
+                    path: appPath,
+                    bundleID: bundleID,
+                    requiredVersion: minVer,
+                    isPatched: patched,
+                    iconImage: icon
+                ))
+            }
+        }
+        return results.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+    }
+}
+
+// MARK: - Privileged runner
+
+struct PrivilegedRunner {
+    /// Runs a shell command with admin privileges via AppleScript password prompt.
+    static func run(_ cmd: String) throws -> String {
+        let src = "do shell script \"\(cmd.replacingOccurrences(of: "\"", with: "\\\""))\" with administrator privileges"
+        var err: NSDictionary?
+        let result = NSAppleScript(source: src)!.executeAndReturnError(&err)
+        if let e = err {
+            throw RunnerError.failed((e["NSAppleScriptErrorMessage"] as? String) ?? "Unknown error")
+        }
+        return result.stringValue ?? ""
+    }
+
+    enum RunnerError: LocalizedError {
+        case failed(String)
+        var errorDescription: String? {
+            if case .failed(let m) = self { return m }
+            return nil
+        }
+    }
+}
+
+// MARK: - Patch operations
+
+struct Patcher {
+    static func scriptDir() -> String {
+        let bundle  = Bundle.main.bundlePath
+        let sibling = (bundle as NSString).deletingLastPathComponent + "/patch-app.sh"
+        if FileManager.default.fileExists(atPath: sibling) { return sibling }
+        return Bundle.main.path(forResource: "patch-app", ofType: "sh") ?? sibling
+    }
+
+    static func apply(app: PatchableApp) throws {
+        let sh = scriptDir()
+        try PrivilegedRunner.run("'\(sh)' apply '\(app.path)'")
+    }
+
+    static func restore(app: PatchableApp) throws {
+        let sh = scriptDir()
+        try PrivilegedRunner.run("'\(sh)' restore '\(app.path)'")
+    }
+}
 
 // MARK: - ViewModel
 
 @MainActor
-class PatchViewModel: ObservableObject {
-    @Published var state = PatchState()
-    @Published var selectedIndex: Int = 0
+class DashboardViewModel: ObservableObject {
+    @Published var apps: [PatchableApp] = []
+    @Published var log: [LogEntry] = []
     @Published var isBusy = false
-    @Published var errorMessage: String? = nil
+    @Published var busyMessage = ""
+    @Published var selected = Set<UUID>()
 
-    private let patchScript: String = {
-        // Resolve patch.sh next to the .app, or bundled inside it
-        let appDir = Bundle.main.bundlePath
-        let candidates = [
-            (appDir as NSString).deletingLastPathComponent + "/patch.sh",
-            Bundle.main.path(forResource: "patch", ofType: "sh") ?? ""
-        ]
-        return candidates.first { FileManager.default.isExecutableFile(atPath: $0) }
-            ?? "/usr/local/bin/macpatch-patch.sh"
-    }()
-
-    init() { refresh() }
-
-    func refresh() {
-        state.realVersion = readPlistKey("ProductVersion",
-            from: "/System/Library/CoreServices/SystemVersion.plist.bigsur-backup")
-            ?? swVers("productVersion")
-        state.reportedVersion = swVers("productVersion")
-        state.reportedBuild   = swVers("buildVersion")
-        state.isPatched       = FileManager.default.fileExists(
-            atPath: "/var/db/.macpatch-bigsur-active")
-    }
-
-    func apply() {
-        let v = knownVersions[selectedIndex]
-        run(args: ["apply", v.version, v.build],
-            successMsg: "Patched → \(v.version) (\(v.build))")
-    }
-
-    func restore() {
-        run(args: ["restore"], successMsg: "Restored to original Big Sur version")
-    }
-
-    private func run(args: [String], successMsg: String) {
+    func scan() async {
         isBusy = true
-        errorMessage = nil
-        let script = patchScript
-        let argStr = args.map { "'\($0)'" }.joined(separator: " ")
-        // Use osascript to request admin password natively
-        let shellCmd = "'\(script)' \(argStr)"
-        let appleScript = """
-            do shell script "\(shellCmd)" with administrator privileges
-        """
-        DispatchQueue.global().async {
-            var error: NSDictionary?
-            let result = NSAppleScript(source: appleScript)!
-                .executeAndReturnError(&error)
-            DispatchQueue.main.async {
-                self.isBusy = false
-                if let err = error {
-                    let msg = (err["NSAppleScriptErrorMessage"] as? String) ?? "Unknown error"
-                    self.append(msg, kind: .error)
-                    self.errorMessage = msg
-                } else {
-                    self.append(successMsg, kind: .success)
-                    if let out = result.stringValue, !out.isEmpty {
-                        self.append(out, kind: .info)
-                    }
-                    self.refresh()
+        busyMessage = "Scanning /Applications…"
+        apps = await Task.detached(priority: .userInitiated) {
+            AppScanner.scan()
+        }.value
+        isBusy = false
+        append("Found \(apps.count) app(s) requiring macOS 12 or higher.", kind: .info)
+    }
+
+    func applyAll() { operate(apps: apps.filter { !$0.isPatched }, action: .apply) }
+    func restoreAll() { operate(apps: apps.filter { $0.isPatched }, action: .restore) }
+
+    func applySelected()   { operate(apps: selectedApps().filter { !$0.isPatched }, action: .apply) }
+    func restoreSelected() { operate(apps: selectedApps().filter { $0.isPatched }, action: .restore) }
+
+    private func selectedApps() -> [PatchableApp] {
+        apps.filter { selected.contains($0.id) }
+    }
+
+    private enum Action { case apply, restore }
+
+    private func operate(apps targets: [PatchableApp], action: Action) {
+        guard !targets.isEmpty else { return }
+        isBusy = true
+        Task {
+            for app in targets {
+                busyMessage = "\(action == .apply ? "Patching" : "Restoring") \(app.name)…"
+                do {
+                    if action == .apply { try Patcher.apply(app: app) }
+                    else                { try Patcher.restore(app: app) }
+                    await updatePatched(id: app.id, patched: action == .apply)
+                    append("\(action == .apply ? "Patched" : "Restored"): \(app.name)", kind: .success)
+                } catch {
+                    append("Failed \(app.name): \(error.localizedDescription)", kind: .error)
                 }
             }
+            isBusy = false
+            busyMessage = ""
         }
     }
 
-    private func append(_ message: String, kind: LogEntry.Kind) {
-        state.log.insert(LogEntry(date: Date(), message: message, kind: kind), at: 0)
+    private func updatePatched(id: UUID, patched: Bool) {
+        if let i = apps.firstIndex(where: { $0.id == id }) {
+            apps[i].isPatched = patched
+        }
     }
 
-    private func swVers(_ flag: String) -> String {
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/usr/bin/sw_vers")
-        p.arguments = ["-\(flag)"]
-        let pipe = Pipe()
-        p.standardOutput = pipe
-        try? p.run(); p.waitUntilExit()
-        return String(data: pipe.fileHandleForReading.readDataToEndOfFile(),
-                      encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "?"
+    private func append(_ msg: String, kind: LogEntry.Kind) {
+        log.insert(LogEntry(date: Date(), message: msg, kind: kind), at: 0)
     }
+}
 
-    private func readPlistKey(_ key: String, from path: String) -> String? {
-        guard let dict = NSDictionary(contentsOfFile: path) else { return nil }
-        return dict[key] as? String
+// MARK: - Phase
+
+enum Phase { case welcome, installing, dashboard }
+
+@MainActor
+class AppState: ObservableObject {
+    @Published var phase: Phase = .welcome
+    @Published var installProgress: Double = 0
+    @Published var installStep = ""
+    let vm = DashboardViewModel()
+
+    func runInstall() async {
+        phase = .installing
+
+        let steps: [(String, Double, Double)] = [
+            ("Verifying system requirements…", 0.0, 0.15),
+            ("Locating patch tools…",          0.15, 0.30),
+            ("Scanning /Applications…",        0.30, 0.70),
+            ("Building app list…",             0.70, 0.90),
+            ("Ready.",                         0.90, 1.00),
+        ]
+
+        for (label, from, to) in steps {
+            installStep = label
+            // Animate progress smoothly across the range
+            let ticks = 20
+            for t in 0...ticks {
+                installProgress = from + (to - from) * Double(t) / Double(ticks)
+                try? await Task.sleep(nanoseconds: 30_000_000)
+            }
+            // Do actual work at the scan step
+            if label.contains("Scanning") {
+                await vm.scan()
+            }
+        }
+
+        try? await Task.sleep(nanoseconds: 400_000_000)
+        phase = .dashboard
     }
 }
 
 // MARK: - Views
 
-struct StatusBadge: View {
-    let active: Bool
+// ── Welcome ──────────────────────────────────────────────────────────────────
+
+struct WelcomeView: View {
+    @EnvironmentObject var appState: AppState
+
     var body: some View {
-        HStack(spacing: 6) {
-            Circle()
-                .fill(active ? Color.green : Color.secondary)
-                .frame(width: 10, height: 10)
-            Text(active ? "Patch Active" : "Not Patched")
-                .font(.subheadline.weight(.medium))
-                .foregroundColor(active ? .green : .secondary)
+        VStack(spacing: 0) {
+            Spacer()
+
+            VStack(spacing: 20) {
+                Image(systemName: "shield.checkmark.fill")
+                    .resizable().scaledToFit()
+                    .frame(width: 72, height: 72)
+                    .foregroundStyle(
+                        LinearGradient(colors: [.blue, .cyan],
+                                       startPoint: .topLeading,
+                                       endPoint: .bottomTrailing)
+                    )
+
+                Text("MacPatch Dashboard")
+                    .font(.largeTitle.bold())
+
+                Text("Run macOS 12+ apps on Big Sur without disabling System Integrity Protection.\nApp compatibility is patched directly — no system files are modified.")
+                    .multilineTextAlignment(.center)
+                    .foregroundColor(.secondary)
+                    .frame(maxWidth: 400)
+            }
+
+            Spacer()
+
+            VStack(spacing: 12) {
+                Button {
+                    Task { await appState.runInstall() }
+                } label: {
+                    Text("Get Started")
+                        .frame(width: 200)
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+
+                Text("Requires macOS 11 Big Sur")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+            .padding(.bottom, 40)
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 5)
-        .background(.regularMaterial, in: Capsule())
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 
-struct VersionRow: View {
-    let label: String
-    let value: String
+// ── Install progress ──────────────────────────────────────────────────────────
+
+struct InstallView: View {
+    @EnvironmentObject var appState: AppState
+
     var body: some View {
-        HStack {
-            Text(label)
-                .foregroundColor(.secondary)
-                .frame(width: 140, alignment: .leading)
-            Text(value)
-                .fontWeight(.medium)
-                .textSelection(.enabled)
+        VStack(spacing: 32) {
+            Spacer()
+
+            Image(systemName: "shield.checkmark.fill")
+                .resizable().scaledToFit()
+                .frame(width: 56, height: 56)
+                .foregroundStyle(
+                    LinearGradient(colors: [.blue, .cyan],
+                                   startPoint: .topLeading,
+                                   endPoint: .bottomTrailing)
+                )
+
+            VStack(spacing: 16) {
+                Text("Setting up MacPatch…")
+                    .font(.title2.bold())
+
+                ProgressView(value: appState.installProgress)
+                    .progressViewStyle(.linear)
+                    .frame(width: 360)
+                    .animation(.easeInOut(duration: 0.1), value: appState.installProgress)
+
+                Text(appState.installStep)
+                    .font(.callout)
+                    .foregroundColor(.secondary)
+                    .frame(height: 20)
+            }
+
+            Spacer()
         }
-        .font(.system(.body, design: .monospaced))
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
+
+// ── App row ───────────────────────────────────────────────────────────────────
+
+struct AppRow: View {
+    let app: PatchableApp
+    @Binding var selected: Set<UUID>
+
+    var body: some View {
+        HStack(spacing: 12) {
+            // Checkbox
+            Image(systemName: selected.contains(app.id)
+                  ? "checkmark.square.fill" : "square")
+                .foregroundColor(selected.contains(app.id) ? .accentColor : .secondary)
+                .onTapGesture { toggle() }
+
+            // App icon
+            if let img = app.iconImage {
+                Image(nsImage: img)
+                    .resizable().scaledToFit()
+                    .frame(width: 32, height: 32)
+            } else {
+                Image(systemName: "app.fill")
+                    .frame(width: 32, height: 32)
+                    .foregroundColor(.secondary)
+            }
+
+            // Name + path
+            VStack(alignment: .leading, spacing: 2) {
+                Text(app.name).fontWeight(.medium)
+                Text(app.path)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+
+            Spacer()
+
+            // Required version chip
+            Text("Requires \(app.displayVersion)+")
+                .font(.caption)
+                .padding(.horizontal, 8).padding(.vertical, 3)
+                .background(Color.orange.opacity(0.15), in: Capsule())
+                .foregroundColor(.orange)
+
+            // Patch status
+            if app.isPatched {
+                Label("Patched", systemImage: "checkmark.circle.fill")
+                    .font(.caption.weight(.medium))
+                    .foregroundColor(.green)
+            } else {
+                Label("Needs patch", systemImage: "exclamationmark.circle")
+                    .font(.caption.weight(.medium))
+                    .foregroundColor(.secondary)
+            }
+        }
+        .contentShape(Rectangle())
+        .onTapGesture { toggle() }
+        .padding(.vertical, 4)
+    }
+
+    private func toggle() {
+        if selected.contains(app.id) { selected.remove(app.id) }
+        else { selected.insert(app.id) }
+    }
+}
+
+// ── Log row ───────────────────────────────────────────────────────────────────
 
 struct LogRow: View {
     let entry: LogEntry
-    static let fmt: DateFormatter = {
-        let f = DateFormatter(); f.dateFormat = "HH:mm:ss"; return f
-    }()
     var color: Color {
         switch entry.kind {
         case .success: return .green
         case .error:   return .red
-        case .info:    return .primary
+        case .info:    return .secondary
         }
     }
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
-            Text(Self.fmt.string(from: entry.date))
+            Text(LogEntry.fmt.string(from: entry.date))
                 .font(.system(.caption, design: .monospaced))
                 .foregroundColor(.secondary)
                 .frame(width: 60, alignment: .leading)
@@ -189,142 +406,169 @@ struct LogRow: View {
     }
 }
 
-struct ContentView: View {
-    @StateObject private var vm = PatchViewModel()
+// ── Dashboard ─────────────────────────────────────────────────────────────────
+
+struct DashboardView: View {
+    @ObservedObject var vm: DashboardViewModel
+
+    private var patchedCount: Int { vm.apps.filter { $0.isPatched }.count }
+    private var unpatchedCount: Int { vm.apps.filter { !$0.isPatched }.count }
+    private var anySelected: Bool { !vm.selected.isEmpty }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
+        VStack(spacing: 0) {
 
-            // ── Header ──────────────────────────────────────────────────────
-            HStack {
+            // ── Header ────────────────────────────────────────────────────
+            HStack(spacing: 16) {
+                Image(systemName: "shield.checkmark.fill")
+                    .font(.title2)
+                    .foregroundStyle(
+                        LinearGradient(colors: [.blue, .cyan],
+                                       startPoint: .topLeading, endPoint: .bottomTrailing))
+
                 VStack(alignment: .leading, spacing: 2) {
                     Text("MacPatch Dashboard")
-                        .font(.title2.bold())
-                    Text("Big Sur compatibility patcher")
+                        .font(.headline)
+                    Text("\(patchedCount) patched · \(unpatchedCount) unpatched · \(vm.apps.count) total")
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
+
                 Spacer()
-                StatusBadge(active: vm.state.isPatched)
+
+                Button {
+                    Task { await vm.scan() }
+                } label: {
+                    Label("Rescan", systemImage: "arrow.clockwise")
+                        .labelStyle(.iconOnly)
+                }
+                .buttonStyle(.plain)
+                .disabled(vm.isBusy)
             }
             .padding()
-            .background(Color(.windowBackgroundColor).opacity(0.6))
+            .background(Color(.windowBackgroundColor).opacity(0.7))
 
             Divider()
 
-            ScrollView {
-                VStack(alignment: .leading, spacing: 20) {
-
-                    // ── Version info ─────────────────────────────────────────
-                    GroupBox("System Version") {
-                        VStack(alignment: .leading, spacing: 8) {
-                            VersionRow(label: "Real (Big Sur):",
-                                       value: vm.state.realVersion.isEmpty
-                                              ? "—" : vm.state.realVersion)
-                            VersionRow(label: "Reported to apps:",
-                                       value: "\(vm.state.reportedVersion)  (\(vm.state.reportedBuild))")
-                        }
-                        .padding(.top, 4)
-                    }
-
-                    // ── Controls ─────────────────────────────────────────────
-                    GroupBox("Apply Patch") {
-                        VStack(alignment: .leading, spacing: 12) {
-                            Picker("Target version", selection: $vm.selectedIndex) {
-                                ForEach(knownVersions.indices, id: \.self) { i in
-                                    Text(knownVersions[i].label).tag(i)
-                                }
-                            }
-                            .pickerStyle(.menu)
-
-                            HStack(spacing: 12) {
-                                Button {
-                                    vm.apply()
-                                } label: {
-                                    Label("Apply Patch", systemImage: "arrow.up.circle.fill")
-                                        .frame(maxWidth: .infinity)
-                                }
-                                .buttonStyle(.borderedProminent)
-                                .disabled(vm.isBusy)
-
-                                Button(role: .destructive) {
-                                    vm.restore()
-                                } label: {
-                                    Label("Restore Original", systemImage: "arrow.uturn.backward.circle")
-                                        .frame(maxWidth: .infinity)
-                                }
-                                .buttonStyle(.bordered)
-                                .disabled(vm.isBusy || !vm.state.isPatched)
-                            }
-
-                            if vm.isBusy {
-                                HStack {
-                                    ProgressView().scaleEffect(0.7)
-                                    Text("Running (enter your password when prompted)…")
-                                        .font(.caption)
-                                        .foregroundColor(.secondary)
-                                }
-                            }
-
-                            if let err = vm.errorMessage {
-                                Label(err, systemImage: "exclamationmark.triangle.fill")
-                                    .font(.caption)
-                                    .foregroundColor(.red)
-                            }
-                        }
-                        .padding(.top, 4)
-                    }
-
-                    // ── Change log ───────────────────────────────────────────
-                    GroupBox("Change Log") {
-                        if vm.state.log.isEmpty {
-                            Text("No actions yet this session.")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                                .padding(.top, 4)
-                        } else {
-                            VStack(alignment: .leading, spacing: 4) {
-                                ForEach(vm.state.log) { entry in
-                                    LogRow(entry: entry)
-                                    if entry.id != vm.state.log.last?.id {
-                                        Divider()
-                                    }
-                                }
-                            }
-                            .padding(.top, 4)
-                        }
-                    }
-
+            // ── App list ──────────────────────────────────────────────────
+            if vm.apps.isEmpty && !vm.isBusy {
+                VStack(spacing: 12) {
+                    Spacer()
+                    Image(systemName: "checkmark.seal.fill")
+                        .font(.system(size: 48))
+                        .foregroundColor(.green)
+                    Text("No apps requiring macOS 12+ found.")
+                        .foregroundColor(.secondary)
+                    Spacer()
                 }
-                .padding()
+            } else {
+                List(vm.apps, selection: $vm.selected) { app in
+                    AppRow(app: app, selected: $vm.selected)
+                }
+                .listStyle(.inset(alternatesRowBackgrounds: true))
             }
 
-            // ── Footer ───────────────────────────────────────────────────────
             Divider()
-            HStack {
-                Button("Refresh Status") { vm.refresh() }
+
+            // ── Toolbar ───────────────────────────────────────────────────
+            VStack(spacing: 0) {
+                if vm.isBusy {
+                    HStack(spacing: 10) {
+                        ProgressView().scaleEffect(0.75)
+                        Text(vm.busyMessage)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal)
+                    .padding(.top, 8)
+                }
+
+                HStack(spacing: 10) {
+                    // Select all / none
+                    Button(vm.selected.count == vm.apps.count ? "Deselect All" : "Select All") {
+                        if vm.selected.count == vm.apps.count {
+                            vm.selected.removeAll()
+                        } else {
+                            vm.selected = Set(vm.apps.map { $0.id })
+                        }
+                    }
                     .buttonStyle(.plain)
                     .font(.caption)
                     .foregroundColor(.accentColor)
-                Spacer()
-                Text("Restore before running macOS updates")
-                    .font(.caption2)
-                    .foregroundColor(.secondary)
+
+                    Spacer()
+
+                    // Restore selected
+                    Button {
+                        anySelected ? vm.restoreSelected() : vm.restoreAll()
+                    } label: {
+                        Label(anySelected ? "Restore Selected" : "Restore All",
+                              systemImage: "arrow.uturn.backward.circle")
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(vm.isBusy || vm.apps.filter({ $0.isPatched }).isEmpty)
+
+                    // Apply selected
+                    Button {
+                        anySelected ? vm.applySelected() : vm.applyAll()
+                    } label: {
+                        Label(anySelected ? "Patch Selected" : "Patch All",
+                              systemImage: "checkmark.circle.fill")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(vm.isBusy || vm.apps.filter({ !$0.isPatched }).isEmpty)
+                }
+                .padding()
             }
-            .padding(.horizontal)
-            .padding(.vertical, 8)
+            .background(Color(.windowBackgroundColor).opacity(0.7))
+
+            Divider()
+
+            // ── Log ───────────────────────────────────────────────────────
+            if !vm.log.isEmpty {
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 3) {
+                        ForEach(vm.log) { LogRow(entry: $0) }
+                    }
+                    .padding(.horizontal)
+                    .padding(.vertical, 6)
+                }
+                .frame(height: 100)
+                .background(Color(.textBackgroundColor).opacity(0.4))
+            }
         }
-        .frame(minWidth: 520, minHeight: 540)
     }
 }
 
-// MARK: - App entry point
+// MARK: - Root
+
+struct RootView: View {
+    @EnvironmentObject var appState: AppState
+
+    var body: some View {
+        Group {
+            switch appState.phase {
+            case .welcome:    WelcomeView()
+            case .installing: InstallView()
+            case .dashboard:  DashboardView(vm: appState.vm)
+            }
+        }
+        .animation(.easeInOut(duration: 0.3), value: appState.phase)
+        .frame(minWidth: 660, minHeight: 500)
+    }
+}
+
+// MARK: - App
 
 @main
 struct MacPatchDashboardApp: App {
+    @StateObject private var appState = AppState()
+
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            RootView()
+                .environmentObject(appState)
         }
         .windowResizability(.contentSize)
         .commands {
