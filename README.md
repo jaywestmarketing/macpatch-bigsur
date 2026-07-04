@@ -27,7 +27,28 @@ macOS apps check `sw_vers` and `/System/Library/CoreServices/SystemVersion.plist
 
 ---
 
-## Usage
+## Installation (GUI Dashboard)
+
+```bash
+git clone https://github.com/jaywestmarketing/macpatch-bigsur.git
+cd macpatch-bigsur
+chmod +x install.sh patch.sh
+./install.sh
+```
+
+`install.sh` compiles the SwiftUI dashboard and installs it to
+`/Applications/MacPatch Dashboard.app`. Xcode Command Line Tools are required
+(the installer prompts to install them if missing).
+
+The dashboard lets you:
+- See your **real** Big Sur version vs what apps are **told**
+- Pick a target macOS version from a dropdown (12.0 – 14.x)
+- **Apply** or **Restore** with one click (native macOS password prompt)
+- View a **change log** of every action taken
+
+---
+
+## CLI Usage
 
 ```bash
 # Clone
@@ -35,7 +56,7 @@ git clone https://github.com/jaywestmarketing/macpatch-bigsur.git
 cd macpatch-bigsur
 chmod +x patch.sh
 
-# Spoof to Monterey 12.6.9 (default)
+# Spoof to Monterey 12.0 (default)
 sudo ./patch.sh apply
 
 # Spoof to a specific version/build

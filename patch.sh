@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # MacPatch BigSur — spoof macOS version so software requiring 12+ runs on 11.x
 # Must be run as root. Tested on macOS 11.0–11.7.
+# GUI callers: set MACPATCH_GUI=1 for terse machine-readable output.
 set -euo pipefail
+
+GUI="${MACPATCH_GUI:-0}"
 
 TARGET_VERSION="${1:-12.0}"      # version to report (default: Monterey 12.0)
 TARGET_BUILD="${2:-21A559}"      # matching build string
