@@ -1,118 +1,91 @@
 # macpatch-bigsur
 
-Spoof the macOS version on **Big Sur (11.x)** to report as **Monterey (12+)** or higher, so software with a minimum-version gate of 12+ will launch on older hardware.
+Run macOS 12+ apps on **Big Sur (11.x)** without disabling System Integrity Protection.
 
-## How it works
-
-macOS apps check `sw_vers` and `/System/Library/CoreServices/SystemVersion.plist` to determine the OS version. `patch.sh` rewrites that plist with the version you choose, tricks version-gated apps into believing they are running on a newer OS, then provides a one-command restore to undo the change.
-
-> **This does not add missing OS features or APIs.** It only bypasses the version check. Apps that require a newer API (e.g. a Metal shader only in 12+) may still crash after bypassing the gate.
+Instead of touching system files, the patcher lowers `LSMinimumSystemVersion` inside each app's own bundle and re-signs it with an ad-hoc signature. SIP is not required.
 
 ---
 
-## Prerequisites
-
-| Requirement | Why |
-|---|---|
-| macOS 11 Big Sur | Target OS |
-| SIP disabled | `SystemVersion.plist` is in a SIP-protected path |
-| `sudo` / root | Writing to `/System/Library/CoreServices/` |
-
-### Disable SIP
-
-1. Shut down the Mac.
-2. Boot to Recovery (Apple Silicon: hold power; Intel: hold ⌘R).
-3. Open Terminal from the Utilities menu.
-4. Run `csrutil disable` and reboot.
-
----
-
-## Installation (GUI Dashboard)
+## Install
 
 ```bash
 git clone https://github.com/jaywestmarketing/macpatch-bigsur.git
 cd macpatch-bigsur
-chmod +x install.sh patch.sh
+chmod +x install.sh patch-app.sh
 ./install.sh
 ```
 
-`install.sh` compiles the SwiftUI dashboard and installs it to
-`/Applications/MacPatch Dashboard.app`. Xcode Command Line Tools are required
-(the installer prompts to install them if missing).
+The installer compiles the SwiftUI dashboard and drops it in  
+`/Applications/MacPatch Dashboard.app`. Xcode Command Line Tools are required  
+(the installer will prompt to install them if they're missing).
 
-The dashboard lets you:
-- See your **real** Big Sur version vs what apps are **told**
-- Pick a target macOS version from a dropdown (12.0 – 14.x)
-- **Apply** or **Restore** with one click (native macOS password prompt)
-- View a **change log** of every action taken
-
----
-
-## CLI Usage
+After installation, double-click the app in `/Applications` or run:
 
 ```bash
-# Clone
-git clone https://github.com/jaywestmarketing/macpatch-bigsur.git
-cd macpatch-bigsur
-chmod +x patch.sh
-
-# Spoof to Monterey 12.0 (default)
-sudo ./patch.sh apply
-
-# Spoof to a specific version/build
-sudo ./patch.sh apply 13.6.9 22G931   # Ventura
-
-# Check current state
-sudo ./patch.sh status
-
-# Undo — always restore before running a system update
-sudo ./patch.sh restore
+open -a "MacPatch Dashboard"
 ```
 
 ---
 
-## Build string reference
+## Dashboard
 
-### macOS 12 Monterey
+The app opens with a **welcome screen → install progress screen → dashboard**.
 
-| Version | Build |
+| What you see | What it does |
 |---|---|
-| 12.0 | 21A559 |
-| 12.3 | 21E230 |
-| 12.6 | 21G115 |
-| 12.6.9 | 21G931 |
-| 12.7.6 | 21H1320 |
-
-### macOS 13 Ventura
-
-| Version | Build |
-|---|---|
-| 13.0 | 22A380 |
-| 13.5 | 22G74 |
-| 13.6.9 | 22G931 |
-| 13.7.6 | 22H625 |
+| App list | All apps in /Applications requiring macOS 12 or higher |
+| Status badges | Shows which apps are already patched |
+| Patch / Restore buttons | One click — prompts for your password via native macOS dialog |
+| Change log | Timestamped record of every action this session |
+| Rescan button | Re-scans /Applications for new apps |
 
 ---
 
-## Known limitations
+## How it works
 
-- **Kernel version (`uname -r`) is not spoofed.** A small number of apps check this directly instead of `sw_vers`. Spoofing `uname` would require a kernel extension, which is out of scope here.
-- **Metal/API availability is not spoofed.** Newer graphics APIs physically don't exist in Big Sur; bypassing the version gate won't add them.
-- **Apple silicon vs Intel.** Tested on both. The plist path is the same on both architectures.
-- **Restore before updates.** Running a macOS update with the plist patched may confuse the installer. Always run `sudo ./patch.sh restore` first.
+For each app you patch:
+
+1. Backs up `App.app/Contents/Info.plist` → `Info.plist.macpatch-backup`
+2. Sets `LSMinimumSystemVersion` to `11.0`
+3. Ad-hoc re-signs the bundle with `codesign --force --deep --sign -`
+
+To restore, the original `Info.plist` is copied back and the app is re-signed.
+
+No system directories are modified. SIP does not need to be disabled.
 
 ---
 
-## Reverting
+## CLI (optional)
 
 ```bash
-sudo ./patch.sh restore
-```
+# Patch a specific app
+sudo ./patch-app.sh apply  /Applications/SomeApp.app
 
-The original plist is backed up to `/System/Library/CoreServices/SystemVersion.plist.bigsur-backup` and is restored verbatim.
+# Restore a specific app
+sudo ./patch-app.sh restore /Applications/SomeApp.app
+```
 
 ---
 
-## Legal / disclaimer
+## Limitations
 
-Patching system files is unsupported by Apple. Use at your own risk. This tool is provided for educational purposes and legitimate compatibility testing on hardware you own.
+- **Missing APIs still crash.** Bypassing the version gate doesn't add macOS 12 APIs. Apps that call APIs that literally don't exist in Big Sur will crash after launch.
+- **App Store apps** use hardened runtime + notarization checks and cannot be patched this way.
+- **Re-signing breaks the original signature.** The app will show as "unsigned" if you check with `codesign -v`. This is expected.
+- **Restore before updating an app.** If you update a patched app through its built-in updater or the App Store, the patch is overwritten automatically (which is fine — just re-patch if needed).
+
+---
+
+## Requirements
+
+| Requirement | Notes |
+|---|---|
+| macOS 11 Big Sur | Target OS |
+| Xcode Command Line Tools | Required to compile the dashboard (install.sh will prompt) |
+| SIP | **Does not need to be disabled** |
+
+---
+
+## Legal
+
+Modifying app bundles is done on apps you have installed and own a license to use. This tool does not bypass copy protection or license enforcement — only the OS version gate. Use responsibly on your own hardware.
