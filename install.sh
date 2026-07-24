@@ -54,17 +54,25 @@ trap 'rm -rf "$BUILD_DIR"' EXIT
 
 BINARY="$BUILD_DIR/MacPatchDashboard"
 
+# Swift only allows top-level executable code in a file named main.swift
+cp "$SWIFT_SRC" "$BUILD_DIR/main.swift"
+
+COMPILE_LOG="$BUILD_DIR/compile.log"
 swiftc \
-    "$SWIFT_SRC" \
+    "$BUILD_DIR/main.swift" \
     -o "$BINARY" \
     -sdk "$(xcrun --show-sdk-path)" \
     -target "$(uname -m)-apple-macos11.0" \
     -framework SwiftUI \
     -framework AppKit \
     -framework Foundation \
-    2>&1 | grep -v "^$" | sed 's/^/    /' || die "Compilation failed — see output above"
+    > "$COMPILE_LOG" 2>&1
 
-[[ -f "$BINARY" ]] || die "Binary not produced — compilation may have failed silently"
+if [[ $? -ne 0 || ! -f "$BINARY" ]]; then
+    grep -v "^$" "$COMPILE_LOG" | sed 's/^/    /'
+    die "Compilation failed — see output above"
+fi
+grep "error:" "$COMPILE_LOG" | sed 's/^/    /' || true
 ok "Compilation complete"
 
 # ── Build .app bundle ─────────────────────────────────────────────────────────
