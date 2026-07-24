@@ -83,11 +83,17 @@ CONTENTS="$BUNDLE/Contents"
 MACOS_DIR="$CONTENTS/MacOS"
 RESOURCES_DIR="$CONTENTS/Resources"
 
-mkdir -p "$MACOS_DIR" "$RESOURCES_DIR"
+mkdir -p "$MACOS_DIR" "$RESOURCES_DIR" "$RESOURCES_DIR/plugins"
 
 cp "$BINARY"       "$MACOS_DIR/MacPatchDashboard"
 cp "$PATCH_SCRIPT" "$RESOURCES_DIR/patch-app.sh"
+# Bundle the hardware probe and store plugins so the Store tab can verify + gate
+[[ -f "$SCRIPT_DIR/probe.sh" ]] && cp "$SCRIPT_DIR/probe.sh" "$RESOURCES_DIR/probe.sh"
+if compgen -G "$SCRIPT_DIR/plugins/*.mplugin" >/dev/null; then
+    cp "$SCRIPT_DIR"/plugins/*.mplugin "$RESOURCES_DIR/plugins/"
+fi
 chmod +x "$MACOS_DIR/MacPatchDashboard" "$RESOURCES_DIR/patch-app.sh"
+[[ -f "$RESOURCES_DIR/probe.sh" ]] && chmod +x "$RESOURCES_DIR/probe.sh"
 
 cat > "$MACOS_DIR/patch-app.sh" <<'WRAPPER'
 #!/usr/bin/env bash

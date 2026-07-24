@@ -102,6 +102,98 @@ struct Patcher {
     }
 }
 
+// MARK: - Store model (plugins + hardware gate)
+
+enum GateVerdict { case pass, block, unknown }
+
+struct StorePlugin: Identifiable {
+    let id: String
+    let name: String
+    let vendor: String
+    let category: String
+    let appPath: String
+    let filePath: String        // path to the .mplugin file
+    let minRamGB: Int
+    let minCores: Int
+    let archReq: String
+    // Filled in by the gate:
+    var gateVerdict: GateVerdict = .unknown
+    var gateReasons: [String] = []
+}
+
+struct Store {
+    /// Locate the bundled scripts/plugins directory (Resources), with dev fallback.
+    static func resourcesDir() -> String {
+        let exe   = Bundle.main.executablePath ?? ""
+        let macOS = (exe as NSString).deletingLastPathComponent
+        let res   = ((macOS as NSString).appendingPathComponent("../Resources") as NSString)
+                        .standardizingPath
+        if FileManager.default.fileExists(atPath: res) { return res }
+        return macOS
+    }
+
+    static func probePath() -> String {
+        let p = (resourcesDir() as NSString).appendingPathComponent("probe.sh")
+        return p
+    }
+
+    static func loadPlugins() -> [StorePlugin] {
+        let dir = (resourcesDir() as NSString).appendingPathComponent("plugins")
+        let fm = FileManager.default
+        guard let files = try? fm.contentsOfDirectory(atPath: dir) else { return [] }
+        var out: [StorePlugin] = []
+        for f in files where f.hasSuffix(".mplugin") {
+            let full = (dir as NSString).appendingPathComponent(f)
+            guard let data = fm.contents(atPath: full),
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+            else { continue }
+            let req = (json["requirements"] as? [String: Any]) ?? [:]
+            out.append(StorePlugin(
+                id:       (json["id"] as? String) ?? f,
+                name:     (json["name"] as? String) ?? f,
+                vendor:   (json["vendor"] as? String) ?? "",
+                category: (json["category"] as? String) ?? "",
+                appPath:  (json["app_path"] as? String) ?? "",
+                filePath: full,
+                minRamGB: (req["min_ram_gb"] as? Int) ?? 0,
+                minCores: (req["min_cpu_cores"] as? Int) ?? 0,
+                archReq:  (req["arch"] as? String) ?? "any"
+            ))
+        }
+        return out.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+    }
+
+    /// Runs `probe.sh gate <plugin>`. exit 0 = pass, exit 2 = block.
+    /// Fail-closed: any error or unexpected exit is treated as BLOCK.
+    static func runGate(_ plugin: StorePlugin) -> (GateVerdict, [String]) {
+        let probe = probePath()
+        guard FileManager.default.isExecutableFile(atPath: probe) else {
+            return (.block, ["probe.sh not found — cannot verify hardware, blocked for safety"])
+        }
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/bin/bash")
+        task.arguments = [probe, "gate", plugin.filePath]
+        let out = Pipe(); let err = Pipe()
+        task.standardOutput = out
+        task.standardError  = err
+        do { try task.run() } catch {
+            return (.block, ["Could not run hardware check: \(error.localizedDescription)"])
+        }
+        task.waitUntilExit()
+        let errStr = String(data: err.fileHandleForReading.readDataToEndOfFile(),
+                            encoding: .utf8) ?? ""
+        let reasons = errStr.split(separator: "\n").map {
+            String($0).replacingOccurrences(of: "BLOCK: ", with: "")
+        }
+        if task.terminationStatus == 0 {
+            return (.pass, [])
+        } else {
+            // Any non-zero (including 2) = block. Fail-closed.
+            return (.block, reasons.isEmpty ? ["Hardware requirements not met"] : reasons)
+        }
+    }
+}
+
 // MARK: - ViewModel
 
 class DashboardViewModel: ObservableObject {
@@ -496,10 +588,194 @@ struct RootView: View {
             switch appState.phase {
             case .welcome:    WelcomeView()
             case .installing: InstallView()
-            case .dashboard:  DashboardView(vm: appState.vm)
+            case .dashboard:  MainTabView(vm: appState.vm)
             }
         }
         .frame(minWidth: 660, minHeight: 500)
+    }
+}
+
+// MARK: - Store ViewModel
+
+class StoreViewModel: ObservableObject {
+    @Published var plugins: [StorePlugin] = []
+    @Published var isChecking = false
+
+    func loadAndVerify() {
+        isChecking = true
+        DispatchQueue.global(qos: .userInitiated).async {
+            var loaded = Store.loadPlugins()
+            for i in loaded.indices {
+                let (verdict, reasons) = Store.runGate(loaded[i])
+                loaded[i].gateVerdict = verdict
+                loaded[i].gateReasons = reasons
+            }
+            DispatchQueue.main.async {
+                self.plugins = loaded
+                self.isChecking = false
+            }
+        }
+    }
+}
+
+// MARK: - Store views
+
+struct GateBadge: View {
+    let verdict: GateVerdict
+    var body: some View {
+        switch verdict {
+        case .pass:
+            return AnyView(Label("Compatible", systemImage: "checkmark.seal.fill")
+                .font(.caption.weight(.semibold)).foregroundColor(.green))
+        case .block:
+            return AnyView(Label("Not compatible", systemImage: "xmark.seal.fill")
+                .font(.caption.weight(.semibold)).foregroundColor(.red))
+        case .unknown:
+            return AnyView(Label("Checking…", systemImage: "hourglass")
+                .font(.caption).foregroundColor(.secondary))
+        }
+    }
+}
+
+struct StoreRow: View {
+    let plugin: StorePlugin
+    let onBuy: (StorePlugin) -> Void
+
+    private var canBuy: Bool { plugin.gateVerdict == .pass }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 10) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(plugin.name).font(.headline)
+                    Text("\(plugin.vendor) · \(plugin.category)")
+                        .font(.caption).foregroundColor(.secondary)
+                }
+                Spacer()
+                GateBadge(verdict: plugin.gateVerdict)
+            }
+
+            Text("Requires \(plugin.minRamGB) GB RAM · \(plugin.minCores) CPU cores"
+                 + (plugin.archReq == "any" ? "" : " · \(plugin.archReq)"))
+                .font(.caption).foregroundColor(.secondary)
+
+            if plugin.gateVerdict == .block && !plugin.gateReasons.isEmpty {
+                ForEach(plugin.gateReasons, id: \.self) { r in
+                    Label(r, systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption2).foregroundColor(.red)
+                }
+            }
+
+            HStack {
+                Spacer()
+                Button(action: { onBuy(plugin) }) {
+                    Text(canBuy ? "Buy & Patch" : "Blocked")
+                        .font(.caption.weight(.semibold))
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 14).padding(.vertical, 6)
+                        .background(canBuy ? Color.blue : Color.gray)
+                        .cornerRadius(6)
+                }
+                .buttonStyle(PlainButtonStyle())
+                .disabled(!canBuy)   // hard block: purchase impossible when gate fails
+            }
+        }
+        .padding(.vertical, 8)
+    }
+}
+
+struct StoreView: View {
+    @ObservedObject var store: StoreViewModel
+    @ObservedObject var vm: DashboardViewModel
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Store").font(.headline)
+                    Text("Every patch is checked against this Mac's CPU & RAM before purchase")
+                        .font(.caption).foregroundColor(.secondary)
+                }
+                Spacer()
+                if store.isChecking { ProgressView().scaleEffect(0.7) }
+                Button(action: { store.loadAndVerify() }) {
+                    Image(systemName: "arrow.clockwise")
+                }
+                .buttonStyle(PlainButtonStyle())
+                .disabled(store.isChecking)
+            }
+            .padding()
+            .background(Color(NSColor.windowBackgroundColor))
+
+            Divider()
+
+            if store.plugins.isEmpty && !store.isChecking {
+                VStack(spacing: 10) {
+                    Spacer()
+                    Image(systemName: "bag").font(.system(size: 40)).foregroundColor(.secondary)
+                    Text("No plugins found in the bundle.").foregroundColor(.secondary)
+                    Spacer()
+                }
+            } else {
+                List(store.plugins) { p in
+                    StoreRow(plugin: p, onBuy: buy)
+                }
+                .listStyle(PlainListStyle())
+            }
+        }
+        .onAppear { if store.plugins.isEmpty { store.loadAndVerify() } }
+    }
+
+    // Purchase + patch. The gate already passed to enable this button; patch-app.sh
+    // re-runs the gate at install time as a second, independent enforcement.
+    private func buy(_ plugin: StorePlugin) {
+        guard plugin.gateVerdict == .pass else { return }
+        vm.append("Purchasing \(plugin.name)…", kind: .info)
+        DispatchQueue.global(qos: .userInitiated).async {
+            let probe = Store.probePath()
+            let script = Patcher.scriptPath()
+            // Pass the plugin so patch-app.sh enforces the gate again at install time.
+            let cmd = "'\(script)' apply '\(plugin.appPath)' '\(plugin.filePath)'"
+            do {
+                _ = try runPrivileged(cmd)
+                DispatchQueue.main.async {
+                    vm.append("Installed & patched: \(plugin.name)", kind: .success)
+                    vm.scan()
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    vm.append("Patch refused for \(plugin.name): \(error.localizedDescription)", kind: .error)
+                }
+            }
+            _ = probe
+        }
+    }
+}
+
+// MARK: - Tabbed container
+
+struct MainTabView: View {
+    @ObservedObject var vm: DashboardViewModel
+    @StateObject private var store = StoreViewModel()
+    @State private var tab = 0
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Picker("", selection: $tab) {
+                Text("My Apps").tag(0)
+                Text("Store").tag(1)
+            }
+            .pickerStyle(SegmentedPickerStyle())
+            .padding(.horizontal).padding(.top, 10).padding(.bottom, 6)
+
+            Divider()
+
+            if tab == 0 {
+                DashboardView(vm: vm)
+            } else {
+                StoreView(store: store, vm: vm)
+            }
+        }
     }
 }
 
