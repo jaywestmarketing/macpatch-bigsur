@@ -1,0 +1,24 @@
+{
+  "id": "ollama",
+  "name": "Ollama",
+  "vendor": "Ollama",
+  "category": "Local LLM",
+  "description": "Menubar app and CLI for running local LLMs (Llama, Mistral, Gemma). Metal-accelerated.",
+  "app_path": "/Applications/Ollama.app",
+  "bundle_id": "com.electron.ollama",
+  "price_usd": 0,
+  "patch": {
+    "type": "min_system_version",
+    "set_version": "11.0"
+  },
+  "requirements": {
+    "min_os_major": 11,
+    "arch": "any",
+    "min_ram_gb": 8,
+    "min_disk_gb": 5,
+    "requires_metal": true,
+    "min_metal_generation": 2,
+    "runtime_risk": "partial"
+  },
+  "notes": "The menubar app patches cleanly. Metal 2 is available on Big Sur, so small models can use GPU. Large models need more RAM/newer GPU than Big Sur-era hardware typically has."
+}

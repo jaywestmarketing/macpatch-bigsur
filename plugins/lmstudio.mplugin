@@ -1,0 +1,24 @@
+{
+  "id": "lmstudio",
+  "name": "LM Studio",
+  "vendor": "Element Labs",
+  "category": "Local LLM",
+  "description": "Run local large language models offline. Uses Metal GPU acceleration for inference.",
+  "app_path": "/Applications/LM Studio.app",
+  "bundle_id": "ai.lmstudio.LMStudio",
+  "price_usd": 0,
+  "patch": {
+    "type": "min_system_version",
+    "set_version": "11.0"
+  },
+  "requirements": {
+    "min_os_major": 11,
+    "arch": "any",
+    "min_ram_gb": 16,
+    "min_disk_gb": 10,
+    "requires_metal": true,
+    "min_metal_generation": 3,
+    "runtime_risk": "launch_only"
+  },
+  "notes": "Needs Metal 3 (macOS 13+) for GPU inference. On Big Sur it will launch but GPU acceleration is unavailable; CPU-only inference is very slow. Verify RAM before purchase."
+}

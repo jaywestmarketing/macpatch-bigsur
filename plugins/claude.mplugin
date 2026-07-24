@@ -1,0 +1,24 @@
+{
+  "id": "claude",
+  "name": "Claude",
+  "vendor": "Anthropic",
+  "category": "AI Assistant",
+  "description": "Anthropic's Claude desktop app. Electron-based, so it runs fully once the version gate is bypassed.",
+  "app_path": "/Applications/Claude.app",
+  "bundle_id": "com.anthropic.claudefordesktop",
+  "price_usd": 0,
+  "patch": {
+    "type": "min_system_version",
+    "set_version": "11.0"
+  },
+  "requirements": {
+    "min_os_major": 11,
+    "arch": "any",
+    "min_ram_gb": 4,
+    "min_disk_gb": 1,
+    "requires_metal": false,
+    "min_metal_generation": 0,
+    "runtime_risk": "full"
+  },
+  "notes": "Electron/web wrapper. No native macOS 12 API dependency. Highest confidence patch."
+}
