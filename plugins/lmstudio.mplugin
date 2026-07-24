@@ -15,6 +15,7 @@
     "min_os_major": 11,
     "arch": "any",
     "min_ram_gb": 16,
+    "min_cpu_cores": 8,
     "min_disk_gb": 10,
     "requires_metal": true,
     "min_metal_generation": 3,

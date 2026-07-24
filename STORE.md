@@ -28,6 +28,32 @@ but doesn't work."
    RED          -> purchase blocked, reasons shown
 ```
 
+## CPU / RAM gate — fail-closed, enforced twice
+
+CPU cores, RAM, and architecture are checked as a **hard gate** with no room for a
+false pass:
+
+- **Deterministic source.** Values come from `sysctl` (`hw.memsize`, `hw.physicalcpu`,
+  `uname -m`) — the same values the OS itself reports. These are not estimates.
+- **Fail-closed.** If any value cannot be read with certainty, the gate returns a
+  sentinel `-1` and **blocks**. There is no code path that treats an unreadable
+  CPU/RAM value as a pass.
+- **Enforced in two places.** The dashboard checks before purchase, and
+  `patch-app.sh` calls `probe.sh gate` again at install time. Even if the UI were
+  bypassed, the patch script itself refuses to modify an app whose CPU/RAM gate fails.
+
+```bash
+./probe.sh gate plugins/lmstudio.mplugin
+#   BLOCK: needs 16 GB RAM, have 8 GB
+#   BLOCK: needs 8 cores, have 4
+#   exit code 2  -> install refused
+```
+
+What this gate **can** guarantee 100%: the machine meets (or fails) the declared
+CPU/RAM/arch numbers. What no tool can guarantee 100%: that an app with met specs will
+behave perfectly at runtime — which is why GPU/OS-feature concerns are surfaced
+separately as YELLOW warnings rather than folded into the hard gate.
+
 ## Verdict meanings
 
 | Verdict | Meaning | Purchase |
