@@ -1,16 +1,21 @@
 #!/usr/bin/env bash
 # patch-app.sh — patch or restore a single .app bundle's LSMinimumSystemVersion
-# Usage: patch-app.sh apply|restore /Applications/SomeApp.app
+# Usage: patch-app.sh apply|restore /Applications/SomeApp.app [plugin.mplugin]
 # Does NOT require SIP disabled. Re-signs with ad-hoc signature after patching.
+#
+# If a plugin file is passed on `apply`, the CPU/RAM/arch gate MUST pass first.
+# This is a hard, fail-closed enforcement point independent of any UI: if the
+# gate cannot verify the hardware, the patch is refused.
 set -euo pipefail
 
 die() { echo "ERROR: $*" >&2; exit 1; }
 
 ACTION="${1:-}"
 APP="${2:-}"
+PLUGIN="${3:-}"
 
 [[ "$ACTION" == "apply" || "$ACTION" == "restore" ]] \
-    || die "Usage: $0 apply|restore /path/to/App.app"
+    || die "Usage: $0 apply|restore /path/to/App.app [plugin.mplugin]"
 [[ -d "$APP" ]] || die "Not a directory: $APP"
 
 PLIST="$APP/Contents/Info.plist"
@@ -20,6 +25,15 @@ BACKUP="$PLIST.macpatch-backup"
 
 if [[ "$ACTION" == "apply" ]]; then
     [[ -f "$BACKUP" ]] && { echo "Already patched: $APP"; exit 0; }
+
+    # Hard CPU/RAM/arch gate before any modification. Fail-closed.
+    if [[ -n "$PLUGIN" ]]; then
+        PROBE="$(dirname "${BASH_SOURCE[0]}")/probe.sh"
+        [[ -x "$PROBE" ]] || die "probe.sh not found next to patch-app.sh; cannot verify hardware"
+        if ! "$PROBE" gate "$PLUGIN"; then
+            die "Hardware gate failed — CPU/RAM/architecture requirements not met. Patch refused."
+        fi
+    fi
 
     # Backup original plist
     cp -p "$PLIST" "$BACKUP"
