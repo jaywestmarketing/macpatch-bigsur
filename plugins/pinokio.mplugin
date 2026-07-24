@@ -1,0 +1,24 @@
+{
+  "id": "pinokio",
+  "name": "Pinokio",
+  "vendor": "Pinokio Computer",
+  "category": "AI App Launcher",
+  "description": "One-click installer/launcher for AI tools like ComfyUI, kohya_ss, and Stable Diffusion pipelines.",
+  "app_path": "/Applications/Pinokio.app",
+  "bundle_id": "computer.pinokio",
+  "price_usd": 0,
+  "patch": {
+    "type": "min_system_version",
+    "set_version": "11.0"
+  },
+  "requirements": {
+    "min_os_major": 11,
+    "arch": "any",
+    "min_ram_gb": 8,
+    "min_disk_gb": 20,
+    "requires_metal": false,
+    "min_metal_generation": 0,
+    "runtime_risk": "partial"
+  },
+  "notes": "The Pinokio launcher itself is Electron and runs fine. Individual AI apps it installs each have their own hardware needs (GPU, disk) that this patch cannot change."
+}
