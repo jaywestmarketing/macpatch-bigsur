@@ -570,7 +570,6 @@ struct MacPatchDashboardApp: App {
             RootView()
                 .environmentObject(appState)
         }
-        .windowResizability(.contentSize)
         .commands {
             CommandGroup(replacing: .newItem) {}
         }
