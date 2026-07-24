@@ -20,11 +20,36 @@ rm -rf "$STAGING"; mkdir -p "$STAGING"
 BUILD_DIR="$(mktemp -d)"; trap 'rm -rf "$BUILD_DIR" "$STAGING"' EXIT
 cp "$SCRIPT_DIR/MacPatchDashboard.swift" "$BUILD_DIR/main.swift"
 
-swiftc "$BUILD_DIR/main.swift" -o "$BUILD_DIR/MacPatchDashboard" \
-    -sdk "$(xcrun --show-sdk-path)" \
-    -target "$(uname -m)-apple-macos11.0" \
-    -framework SwiftUI -framework AppKit -framework Foundation \
-    || die "Compilation failed"
+# Build a UNIVERSAL binary so one download runs on both Intel and Apple Silicon,
+# on every macOS from 11 (Big Sur) through the latest release.
+SDK="$(xcrun --show-sdk-path)"
+DEPLOY_TARGET="11.0"   # minimum OS; the app also runs on all newer macOS versions
+
+build_slice() {
+    local arch="$1" outfile="$2"
+    log "Compiling $arch slice..."
+    swiftc "$BUILD_DIR/main.swift" -o "$outfile" \
+        -sdk "$SDK" \
+        -target "${arch}-apple-macos${DEPLOY_TARGET}" \
+        -framework SwiftUI -framework AppKit -framework Foundation \
+        || die "Compilation failed for $arch"
+}
+
+build_slice "arm64"  "$BUILD_DIR/mpd-arm64"
+build_slice "x86_64" "$BUILD_DIR/mpd-x86_64"
+
+log "Merging into universal binary..."
+lipo -create \
+    "$BUILD_DIR/mpd-arm64" \
+    "$BUILD_DIR/mpd-x86_64" \
+    -output "$BUILD_DIR/MacPatchDashboard" \
+    || die "lipo failed to create universal binary"
+
+# Confirm both architectures are present
+ARCHS="$(lipo -archs "$BUILD_DIR/MacPatchDashboard" 2>/dev/null || echo '')"
+log "Universal binary architectures: $ARCHS"
+[[ "$ARCHS" == *"arm64"* && "$ARCHS" == *"x86_64"* ]] \
+    || die "Universal binary missing an architecture (got: $ARCHS)"
 
 BUNDLE="$STAGING/$APPNAME.app"
 mkdir -p "$BUNDLE/Contents/MacOS" "$BUNDLE/Contents/Resources/plugins"
