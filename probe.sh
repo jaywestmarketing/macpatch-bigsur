@@ -44,6 +44,9 @@ CPU_CORES="$(sysctl -n hw.physicalcpu 2>/dev/null || echo "")"
 CPU_MODEL="$(sysctl -n machdep.cpu.brand_string 2>/dev/null \
              || sysctl -n hw.model 2>/dev/null || echo unknown)"
 
+# Mac model identifier, e.g. MacBookPro11,3 (used to name the device in the store)
+MODEL_ID="$(sysctl -n hw.model 2>/dev/null || echo unknown)"
+
 # GPU / Metal support. Metal 3 requires macOS 13+, so on Big Sur the max is Metal 2.
 # We detect whether a Metal-capable GPU is present and its family via system_profiler.
 GPU_NAME="$(system_profiler SPDisplaysDataType 2>/dev/null \
@@ -71,6 +74,7 @@ emit_machine_json() {
   "arch": "$ARCH",
   "chip_kind": "$CHIP_KIND",
   "cpu_model": "$CPU_MODEL",
+  "model_id": "$MODEL_ID",
   "cpu_cores": $CPU_CORES,
   "ram_gb": $RAM_GB,
   "gpu_name": "$GPU_NAME",
