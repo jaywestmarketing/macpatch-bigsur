@@ -56,10 +56,12 @@ mkdir -p "$BUNDLE/Contents/MacOS" "$BUNDLE/Contents/Resources/plugins"
 cp "$BUILD_DIR/MacPatchDashboard" "$BUNDLE/Contents/MacOS/MacPatchDashboard"
 cp "$SCRIPT_DIR/patch-app.sh"     "$BUNDLE/Contents/Resources/patch-app.sh"
 cp "$SCRIPT_DIR/probe.sh"         "$BUNDLE/Contents/Resources/probe.sh"
+cp "$SCRIPT_DIR/fetch-app.sh"     "$BUNDLE/Contents/Resources/fetch-app.sh"
 cp "$SCRIPT_DIR"/plugins/*.mplugin "$BUNDLE/Contents/Resources/plugins/" 2>/dev/null || true
 chmod +x "$BUNDLE/Contents/MacOS/MacPatchDashboard" \
          "$BUNDLE/Contents/Resources/patch-app.sh" \
-         "$BUNDLE/Contents/Resources/probe.sh"
+         "$BUNDLE/Contents/Resources/probe.sh" \
+         "$BUNDLE/Contents/Resources/fetch-app.sh"
 
 cat > "$BUNDLE/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>

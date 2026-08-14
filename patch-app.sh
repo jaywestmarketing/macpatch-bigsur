@@ -16,24 +16,51 @@ PLUGIN="${3:-}"
 
 [[ "$ACTION" == "apply" || "$ACTION" == "restore" ]] \
     || die "Usage: $0 apply|restore /path/to/App.app [plugin.mplugin]"
-[[ -d "$APP" ]] || die "Not a directory: $APP"
 
-PLIST="$APP/Contents/Info.plist"
-BACKUP="$PLIST.macpatch-backup"
+SELF_DIR="$(dirname "${BASH_SOURCE[0]}")"
 
-[[ -f "$PLIST" ]] || die "Info.plist not found: $PLIST"
+# Read a value from the plugin's requirements/top-level without jq
+plug_val() {
+    local file="$1" path="$2"
+    /usr/bin/python3 - "$file" "$path" <<'PY' 2>/dev/null || echo ""
+import json,sys
+try:
+    d=json.load(open(sys.argv[1])); cur=d
+    for k in sys.argv[2].split('.'):
+        cur=cur.get(k,{})
+    print(cur if isinstance(cur,str) else "")
+except Exception:
+    print("")
+PY
+}
 
 if [[ "$ACTION" == "apply" ]]; then
-    [[ -f "$BACKUP" ]] && { echo "Already patched: $APP"; exit 0; }
-
-    # Hard CPU/RAM/arch gate before any modification. Fail-closed.
+    # Hard CPU/RAM/arch gate BEFORE anything else (download or patch). Fail-closed.
     if [[ -n "$PLUGIN" ]]; then
-        PROBE="$(dirname "${BASH_SOURCE[0]}")/probe.sh"
+        PROBE="$SELF_DIR/probe.sh"
         [[ -x "$PROBE" ]] || die "probe.sh not found next to patch-app.sh; cannot verify hardware"
         if ! "$PROBE" gate "$PLUGIN"; then
             die "Hardware gate failed — CPU/RAM/architecture requirements not met. Patch refused."
         fi
     fi
+
+    # If the app isn't installed yet, download it first (handles the
+    # "app won't download on Big Sur" case by fetching the .app directly).
+    if [[ ! -d "$APP" ]]; then
+        DL_URL=""
+        [[ -n "$PLUGIN" ]] && DL_URL="$(plug_val "$PLUGIN" download_url)"
+        [[ -n "$DL_URL" ]] || die "App not installed and no download_url in plugin: $APP"
+        FETCH="$SELF_DIR/fetch-app.sh"
+        [[ -x "$FETCH" ]] || die "fetch-app.sh not found; cannot download the app"
+        APP_BASENAME="$(basename "$APP")"
+        echo "App not found — downloading $APP_BASENAME..."
+        "$FETCH" "$DL_URL" "$APP_BASENAME" || die "Download/install failed"
+    fi
+
+    PLIST="$APP/Contents/Info.plist"
+    BACKUP="$PLIST.macpatch-backup"
+    [[ -f "$PLIST" ]] || die "Info.plist not found after install: $PLIST"
+    [[ -f "$BACKUP" ]] && { echo "Already patched: $APP"; exit 0; }
 
     # Backup original plist
     cp -p "$PLIST" "$BACKUP"
@@ -50,6 +77,9 @@ if [[ "$ACTION" == "apply" ]]; then
     echo "Patched: $APP"
 
 elif [[ "$ACTION" == "restore" ]]; then
+    [[ -d "$APP" ]] || die "Not a directory: $APP"
+    PLIST="$APP/Contents/Info.plist"
+    BACKUP="$PLIST.macpatch-backup"
     [[ -f "$BACKUP" ]] || { echo "No backup found, nothing to restore: $APP"; exit 0; }
 
     cp -p "$BACKUP" "$PLIST"
