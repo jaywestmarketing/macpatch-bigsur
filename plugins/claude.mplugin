@@ -6,6 +6,7 @@
   "description": "Anthropic's Claude desktop app. Electron-based, so it runs fully once the version gate is bypassed.",
   "app_path": "/Applications/Claude.app",
   "bundle_id": "com.anthropic.claudefordesktop",
+  "download_url": "https://storage.googleapis.com/osprey-downloads-c02f6a0d-347c-492b-a752-3e0651722e97/nest/Claude.dmg",
   "price_usd": 0,
   "patch": {
     "type": "min_system_version",
